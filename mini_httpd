@@ -1,0 +1,173 @@
+#! /usr/bin/perl -w -T
+# Tiny web server to run out of Inetd
+
+use Socket;
+
+my $TOKEN = '[\!\#\$\%\&\x27\*\+\-\.0-9A-Z\^\_\`a-z\|\~]';
+my $GET_FILEREAD_BUFSIZE = 16384;
+$ENV{PATH} = "/bin:/usr/bin";
+
+my %mimetypes = (
+	"txt" => "text/plain",
+	"html" => "text/html",
+	"jpg" => "image/jpeg",
+	"png" => "image/png",
+	"cgi" => "",
+	);
+
+scalar(@ARGV) >= 1 || die "Usage: mini_http <HTDOCS>\n";
+my $HTDOCS = $ARGV[0];
+-d $HTDOCS || die "\$HTDOCS directory \"$HTDOCS\" does not exist.\n";
+
+eval {
+	# Read the request line
+	my $request = <STDIN>;
+
+	# GET /somefile.html HTTP/1.0
+	$request =~ m#^($TOKEN+)\s+(/[^\s\?]*)(?:\?(\S*))?\s+HTTP/\d+\.\d+\r?$# || die "400 Bad request\n";
+	my($method, $file, $query) = ($1, $2, $3);
+
+	# Read the request header
+	while(my $line = <STDIN>)
+		{
+		last if($line =~ /^\r?$/);
+		$line =~ s/[\r\n]+$//;
+		if($line =~ /^(\S+):\s+(.+)$/)
+			{
+			my($name, $value) = ($1, $2);
+			$name =~ tr/a-z/A-Z/;
+			$name =~ s/-/_/g;
+			$ENV{"HTTP_$name"} = $value;
+			}
+		}
+
+	# We don't implement methods other than GET.
+	($method eq "GET") || die "501 Not Implemented\n";
+
+	# We don't implement parent-directory constructs.
+	($file =~ m#/\.\./#) && die "403 Forbidden\n";
+
+	# The requested file should be in the $HTDOCS directory.
+	$file = "$HTDOCS$file";
+
+	# If URL ends in a slash, find an index file.
+	if($file =~ m#^(.*)/$#)
+		{
+		-d $1 || die "404 Not Found\n";
+		foreach my $index (qw(index.html index.cgi))
+			{
+			if(-f "$file$index")
+				{
+				$file .= $index;
+				last;
+				}
+			}
+		die "501 Not Implemented\n" if($file =~ m#/$#);
+		}
+
+	my $ext = $file =~ /\.([^\.]*)$/ ? $1 : "";
+	my $content_type = exists($mimetypes{$ext}) ? $mimetypes{$ext} : "application/octet-stream";
+	if($content_type ne "")
+		{
+		get_file($file, $content_type);
+		}
+	else
+		{
+		get_cgi($file, $query);
+		}
+	};
+if($@)
+	{
+	$@ =~ /^(\d+) (.+)$/ || die;
+	my($code, $code_description) = ($1, $2);
+	my $body = "$code $code_description\n";
+	print "HTTP/1.1 $code $code_description\r\n";
+	print "Content-Type: text/plain\r\n";
+	print "Content-Length: ", length($body), "\r\n";
+	print "Connection: close\r\n";
+	print "\r\n";
+	print "$body";
+	}
+
+sub get_file
+	{
+	my($file, $content_type) = @_;
+	if(!open(FILE, $file))
+		{
+		my $error = $!;
+		($error =~ /^No such /i) &&  die "404 Not Found\n";
+		($error =~ /denied/i) && die "403 Access Denied\n";
+		die "500 Internal Server Error\n";
+		}
+	my($size, $mtime) = (stat FILE)[7,9];
+
+	print "HTTP/1.1 200 OK\r\n";
+	print "Connection: close\r\n";
+	print "Content-Length: ", $size, "\r\n";
+	print "Content-Type: ", $content_type, "\r\n";
+	print "\r\n";
+
+	my $buffer;
+	my $toread;
+	my $gotten;
+	while($size > 0)
+		{
+		$toread = ($size > $GET_FILEREAD_BUFSIZE) ? $GET_FILEREAD_BUFSIZE : $size;
+		$gotten = sysread(FILE, $buffer, $toread);
+		if(!defined($gotten))
+			{
+			#print STDERR "sysread() failed during GET, $!\n";
+			exit 0;
+			}
+		if($gotten < $toread)
+			{
+			#print STDERR "File grew shorter by ", ($toread - $gotten), " bytes during GET!\n";
+			exit 0;
+			}
+		print $buffer;
+		$size -= $gotten;
+		}
+
+	close(FILE);
+	}
+
+sub get_cgi
+	{
+	my($prog, $query) = @_;
+	my $content_type = "";
+
+	(-x $prog) || die "404 Not Found\n";
+	$prog =~ m#(.*)/[^/]*$# || die;
+	chdir $1 || die $!;
+
+	$ENV{QUERY_STRING} = $query if(defined($query));
+
+	$ENV{REMOTE_ADDR} = inet_ntoa((unpack_sockaddr_in(getpeername(STDIN)))[1]);
+
+	open(CGI, "-|", $prog) || die $!;
+	while(my $line = <CGI>)
+		{
+		last if($line =~ /^\r?$/);
+		$content_type = $1 if($line =~ /^Content-Type: (\S+)\r?$/)
+		}
+	die "500 No Content-Type\n" if($content_type eq "");
+	print "HTTP/1.1 200 OK\r\n";
+	print "Connection: close\r\n";
+	print "Content-Type: ", $content_type, "\r\n";
+	print "\r\n";
+	my $buffer;
+	my $gotten;
+	do	{
+		$gotten = read(CGI, $buffer, 4096);
+		if(!defined($gotten))
+			{
+			#print STDERR "read() failed during CGI GET, $!\n";
+			exit 0;
+			}
+		print $buffer;
+		} while($gotten > 0);
+	close(CGI) || die $!;
+	}
+
+# vim: set tabstop=4:
+# vim: set nowrap:
