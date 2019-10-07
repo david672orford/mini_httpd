@@ -10,5 +10,9 @@ This is a very simple HTTP server. It has the following features:
 
 In /etc/inetd.conf:
 
-http stream tcp nowait nobody /usr/local/sbin/mini_httpd mini_httpd /var/www
+ http stream tcp nowait nobody /usr/local/sbin/mini_httpd mini_httpd /var/www
+
+And reload:
+
+ $ sudo killall -HUP inetd
 
